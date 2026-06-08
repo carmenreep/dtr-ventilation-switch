@@ -1,19 +1,28 @@
 
-# packages
-# library(boot)
-# library(mice)
-# library(dplyr)
-# library(zoo)
-# library(MASS)
-# library(ggplot2)
-# library(survival)
+################################################################################
+# Project: Dynamic Treatment Regimes for Ventilation Switching
+# Analysis: P/F >150 vs >200 vs >250 (Stratified by PEEP <8 vs >=8)
+# Outcome: Restricted Mean Time Lost (RMTL) of successful extubation
+################################################################################
 
-# Code for dynamic treatment regimes comparing P/F>150 vs >200 vs >250 depending on whether PEEP is <8 cmH2O or >=8cmH2O
-# For primary outcome: Restricted mean time lost (RMTL) of successful extubation
+# 1. Load Packages
+library(boot)       # For bootstrapping and CIs
+library(mice)       # For missing data imputation
+library(dplyr)      # For data manipulation
+library(tidyr)      # For data cleaning (fill/drop)
+library(zoo)        # For Last Observation Carried Forward (na.locf)
+library(survival)   # For Aalen-Johansen and RMTL
+library(openxlsx)   # For exporting results to Excel
+library(ggplot2)    # For plotting outcomes
 
+# 2. Set Parameters
+num_iterations <- 300
+output_folder_name <- "path/to/your/results" # Change this to your local directory
 
-num_iterations = 300
-df_survival
+# 3. Load Data
+# df_survival <- read.csv("your_data.csv")
+
+################################################################################
 
 
 count <- 0
