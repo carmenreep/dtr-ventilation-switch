@@ -32,7 +32,7 @@ The primary analysis script relies on the specific versions of the following att
 ### Installation
 If you need to install these packages fresh on your system, you can run the following command in your R console:
 ```R
-install.packages(c("boot", "mice", "dplyr", "tidyr", "zoo", "survival", "openxlsx", "ggplot2"))
+install.packages(c("boot", "mice", "dplyr", "tidyr", "zoo", "survival", "openxlsx", "ggplot2")) ```
 
 ---
 ## Required Data Format
