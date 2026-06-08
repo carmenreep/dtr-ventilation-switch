@@ -2,7 +2,7 @@
 
 This repository contains the code to replicate the target trial emulation for switching ventilation modes. 
 
-The analysis evaluates dynamic treatment regimes comparing $PaO_2/FiO_2$ thresholds of **>150 vs >200 vs >250 mmHg**, stratified by whether PEEP is **<8 cmH₂O or $\ge$8 cmH₂O**.
+The analysis evaluates dynamic treatment regimes comparing $PaO_2/FiO_2$ thresholds of **>150 vs >200 vs >250 mmHg**, stratified by whether PEEP is **<8 cmH₂O or ≥8 cmH₂O**.
 
 ### Primary Outcome
 * **Restricted Mean Time Lost (RMTL)** of successful extubation within 28 days (672 hours).
@@ -30,7 +30,7 @@ The outcomes are evaluated using a multi-state competing risks framework via the
 
 ### 4. Dynamic Regulating Variables (Confounders/Triggers)
 The emulation logic dynamically evaluates compatibility with the assigned treatment regimes based on physiological parameters recorded at each hour step:
-* **`peep`** *(numeric)*: Positive End-Expiratory Pressure, used for regime stratification (<8 vs. $\ge$8 cmH₂O).
+* **`peep`** *(numeric)*: Positive End-Expiratory Pressure, used for regime stratification (<8 vs. ≥8 cmH₂O).
 * **`PF_ratio`** *(numeric)*: The $PaO_2/FiO_2$ ratio, evaluated against the dynamic threshold rules.
 
 ### 5. Propensity Score Time-Varying Covariates
