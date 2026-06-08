@@ -2,13 +2,21 @@
 
 This repository contains the code to replicate the target trial emulation for switching ventilation modes. 
 
-The analysis evaluates dynamic treatment regimes comparing $PaO_2/FiO_2$ thresholds of **>150 vs >200 vs >250 mmHg**, stratified by whether PEEP is **<8 cmH₂O or ≥8 cmH₂O**.
+The analysis evaluates dynamic treatment regimes comparing PaO₂/FiO₂ thresholds of **>150 vs >200 vs >250 mmHg**, stratified by whether PEEP is **<8 cmH₂O or ≥8 cmH₂O**.
 
 ### Primary Outcome
 * **Restricted Mean Time Lost (RMTL)** of successful extubation within 28 days (672 hours).
 
 ---
 
+## Prerequisites & Installation
+
+To run the analysis script, you will need **R (version 4.0 or higher)** and the following packages. You can install all dependencies by running this command in your R console:
+
+```R
+install.packages(c("boot", "mice", "dplyr", "tidyr", "zoo", "survival", "openxlsx", "ggplot2"))
+
+---
 ## Required Data Format
 The input dataset (`df_survival`) must be a longitudinal, **long-format** panel dataset grouped by `stay_id`.
 
