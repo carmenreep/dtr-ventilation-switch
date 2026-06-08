@@ -9,10 +9,28 @@ The analysis evaluates dynamic treatment regimes comparing PaO₂/FiO₂ thresho
 
 ---
 
-## Prerequisites & Installation
+## Prerequisites & Computational Environment
 
-To run the analysis script, you will need **R (version 4.0 or higher)** and the following packages. You can install all dependencies by running this command in your R console:
+To guarantee full reproducibility of the dynamic target trial weights, missing data imputations, and bootstrap confidence intervals, this script was run and tested under the following environment:
 
+* **Operating System**: Windows 10 x64 (build 19045)
+* **R Version**: `4.3.1 (2023-06-16 ucrt)`
+* **Platform**: `x86_64-w64-mingw32/x64 (64-bit)`
+
+### Required Package Versions
+The primary analysis script relies on the specific versions of the following attached libraries:
+
+* **`boot`** (v1.3-28.1)
+* **`mice`** (v3.16.0)
+* **`dplyr`** (v1.1.3)
+* **`tidyr`** (v1.3.0)
+* **`zoo`** (v1.8-12)
+* **`survival`** (v3.5-5)
+* **`openxlsx`** (v4.2.5.2)
+* **`ggplot2`** (v3.4.3)
+
+### Installation
+If you need to install these packages fresh on your system, you can run the following command in your R console:
 ```R
 install.packages(c("boot", "mice", "dplyr", "tidyr", "zoo", "survival", "openxlsx", "ggplot2"))
 
