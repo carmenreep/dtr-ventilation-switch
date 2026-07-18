@@ -16,7 +16,7 @@ library(openxlsx)   # For exporting results to Excel
 library(ggplot2)    # For plotting outcomes
 
 # 2. Set Parameters
-num_iterations <- 300
+num_iterations <- 150
 output_folder_name <- "path/to/your/results" # Change this to your local directory
 
 # 3. Load Data
@@ -37,8 +37,6 @@ fboot <- function(df, indices) {
   
   print(count)
   assign("count", count+1, envir = .GlobalEnv)
-  
-  
   
   df_after_TTE_period = df
   ################################################################################
@@ -112,130 +110,66 @@ fboot <- function(df, indices) {
   # convert 'sedation' to factors
   df$sedation <- factor(df$sedation, levels = c('Awake', 'Moderate sedation', 'Deep sedation'), ordered = TRUE)
   df$sedation_w_missing <- factor(df$sedation_w_missing, levels = c('Awake', 'Moderate sedation', 'Deep sedation'), ordered = TRUE)
+
+  # as there is no built-in multilevel ordinal imputation method in mice,  
+  # for MICE purpose only, we convert sedation to numeric
+  # this assumes in between levels are approximately equally spaced
+  df$sedation <- as.numeric(df$sedation)
+      
+  # use missing imputation for all controlled/assisted rows only, keeping first death or extubated event
+  df <- df %>%
+    arrange(stay_id, hour) %>%
+    group_by(stay_id) %>%
+    mutate(
+      terminal_event = extubated == 1 | died == 1,
+      keep_for_imputation = cumsum(terminal_event) <= 1
+    ) %>%
+    ungroup()
   
-  # use missing imputation for all controlled/assisted rows only
-  imv_data <- df[!((df$extubated == 1) | (df$died == 1)),]
-  no_imv_data <- df[(df$extubated == 1) | (df$died == 1), ]
+  imv_data <- df[df$keep_for_imputation, ]
+  no_imv_data <- df[!df$keep_for_imputation, ]
   
   # Use MICE for missingness imputation
-  cols_to_impute <- c("age","PF_ratio", "ph","pco2", "peep", "driving", "rr_set","vt", "cv_sofa", "sedation", "nmb")
-  imputed_data <- tryCatch({
-    complete(mice(imv_data[, cols_to_impute], printFlag = FALSE))
-  }, error = function(e) {
-    warning("Error occurred during mice imputation. Switching to median imputation.")
-    imputed_data_median <- imv_data
-    for (col in cols_to_impute) {
-      if (anyNA(imputed_data_median[[col]])) {
-        if (is.factor(imputed_data_median[[col]])) {
-          # Convert factor to numeric (assuming the levels can be coerced to numeric)
-          imputed_data_median[[col]] <- as.numeric(as.character(imputed_data_median[[col]]))
-        }
-        imputed_data_median[[col]] <- ifelse(is.na(imputed_data_median[[col]]), median(imputed_data_median[[col]], na.rm = TRUE), imputed_data_median[[col]])
-      }
-    }
-    # convert 'sedation' back to a factors
-    imputed_data_median$sedation <- factor(imputed_data_median$sedation, ordered = TRUE)
-    imputed_data_median$sedation_w_missing <- factor(imputed_data_median$sedation_w_missing, ordered = TRUE)
-    
-    return(imputed_data_median)
-  })
+  # select variables (longitudinal + outcome)
+  impute_vars <- c("PF_ratio", "ph","pco2", "peep", "driving", "rr_set","vt",
+                   "cv_sofa", "sedation", "nmb", "successfully_extubated",
+                   "died", "hour", "stay_id", "switched",
+                   "fio2", "pao2", "spo2", "map", "compliance", "ventilatory_ratio")
+  data_impute <- imv_data[, impute_vars]
   
+  ini <- mice(data_impute, maxit = 0, printFlag = FALSE)
+  meth <- ini$method
+  pred <- ini$predictorMatrix #already has diag 0 and the rest 1
   
-  imv_data[, cols_to_impute] <- imputed_data
+  # specify the longitudinal numeric variables
+  longitudinal_numeric <- c("PF_ratio", "ph", "pco2", "peep", "driving", "rr_set", "vt",
+                            "fio2", "pao2", "spo2", "map", "compliance", "ventilatory_ratio","cv_sofa",
+                            "sedation")
+  # set methods for longitudinal numeric
+  meth[longitudinal_numeric] <- "2l.pmm"
+  meth["nmb"] <- "2l.pmm" # binary, 2l.bin is too computationally expensive
+  # no imputation for structural vars:
+  not_imputed <- c("stay_id", "hour", "successfully_extubated", "died",
+                   "switched")
+  meth[not_imputed] <- "" # include them as predictors but do not impute them
   
-  # combine the imputed imv data and the no imv data
-  df <- rbind(imv_data, no_imv_data)
+  # set patient ID as cluster variable (-2) and random slope for time (2) and specify which to not impute (0)
+  pred[, not_imputed] <- 0
+  pred[, "stay_id"] <- -2
+  pred[c(longitudinal_numeric, "nmb"), "hour"] <- 2
   
-  # Make sure cv_sofa score in 'extubated' patients is latest known cv_sofa score
-  df <- df %>%
-    arrange(stay_id, hour) %>%  
-    group_by(stay_id) %>%
-    mutate(cv_sofa = na.locf(cv_sofa, na.rm = FALSE)) # latest known cv_sofa
-  
-  ################################################################################
-  
-  # convert 'cv_sofa' to factors
-  df$cv_sofa <- cut(
-    df$cv_sofa,
-    breaks = c(-Inf, 1, 3, Inf),   # intervals: less than 1, 1 to 3, greater than 3
-    labels = c("<1", "1-3", ">3"),
-    right = FALSE,                 # intervals are left-inclusive, right-exclusive: [a,b)
-    ordered_result = TRUE          # creates an ordered factor
-  )
-  
-  df$cv_sofa_w_missing <- cut(
-    df$cv_sofa_w_missing,
-    breaks = c(-Inf, 1, 3, Inf),   # intervals: less than 1, 1 to 3, greater than 3
-    labels = c("<1", "1-3", ">3"),
-    right = FALSE,                 # intervals are left-inclusive, right-exclusive: [a,b)
-    ordered_result = TRUE          # creates an ordered factor
-  )
-  
-  
-  ################################################################################
-  
-  # add columns of PF, driving pressure, ph, peep values and still_controlled on previous time point (time-1)
-  df <- df %>%
-    arrange(stay_id, hour) %>%
-    group_by(stay_id) %>%
-    mutate(PF_ratio_timemin1 = lag(PF_ratio, default = NA),
-           driving_timemin1  = lag(driving, default = NA),
-           vt_timemin1  = lag(vt, default = NA),
-           pco2_timemin1  = lag(pco2, default = NA),
-           rr_set_timemin1  = lag(rr_set, default = NA),
-           ph_timemin1  = lag(ph, default = NA), 
-           peep_timemin1  = lag(peep, default = NA),
-           cv_sofa_timemin1  = lag(cv_sofa, default = NA),
-           sedation_timemin1  = lag(sedation, default = NA),
-           switched_timemin1  = lag(switched, default = NA),
-           nmb_timemin1  = lag(nmb, default = NA))
-  
-  df$switched_timemin1 <- ifelse(is.na(df$switched_timemin1), 0, df$switched_timemin1)
-  
-  # fill ph, peep, PF, dp , min_vol for extubated/death with latest known value, for confounding
-  df <- df %>%
-    arrange(stay_id, hour) %>%
-    group_by(stay_id) %>%
-    mutate(ph_timemin1 = zoo::na.locf(ph_timemin1, na.rm = FALSE)) %>%
-    mutate(pco2_timemin1 = zoo::na.locf(pco2_timemin1, na.rm = FALSE)) %>%
-    mutate(peep_timemin1 = zoo::na.locf(peep_timemin1, na.rm = FALSE)) %>%
-    mutate(PF_ratio_timemin1 = zoo::na.locf(PF_ratio_timemin1, na.rm = FALSE)) %>%
-    mutate(driving_timemin1 = zoo::na.locf(driving_timemin1, na.rm = FALSE)) %>%
-    mutate(rr_set_timemin1 = zoo::na.locf(rr_set_timemin1, na.rm = FALSE)) %>%
-    mutate(vt_timemin1 = zoo::na.locf(vt_timemin1, na.rm = FALSE)) %>%
-    mutate(sedation_timemin1 = zoo::na.locf(sedation_timemin1, na.rm = FALSE))%>%
-    mutate(nmb_timemin1 = zoo::na.locf(nmb_timemin1, na.rm = FALSE))
-  
-  
-  
-  ################################################################################
-  # Propensity score model
-  ################################################################################
-  print('model')
-  
-  
-  data_model <- df[df$switched_timemin1 == 0 & df$hour != 0 ,]
-  
-  # find probability of switching
-  ps_model <- glm(formula = switched ~ factor(hour) + ph_timemin1*pco2_timemin1 + pco2_timemin1*factor(hour) + ph_timemin1*factor(hour) + PF_ratio_timemin1*factor(hour)+ peep_timemin1*factor(hour) + driving_timemin1*factor(hour) + rr_set_timemin1*factor(hour) + vt_timemin1*factor(hour)+ cv_sofa_timemin1*factor(hour) + sedation_timemin1*factor(hour),
-                  data = data_model, # exclude day 0 as there are no predictor variables (no hour before)
-                  family = "binomial")
-  
-  
-  df$ps <- NA # initialize column
-  df$ps[df$switched_timemin1 == 0 & df$hour != 0 ] <- predict(ps_model,type = "response")
-  df$ps[df$switched_timemin1 == 1] <- 1
-  df$ps[df$hour == 0] <- 0 # probability of switching at day=0 is 0
-  
-  
+  set.seed(100 + indices[1])  # seed varies by bootstrap sample
+  m=2
+  mice_imp <- mice(data_impute, m = m, method = meth, predictorMatrix = pred,
+                   maxit=2, printFlag = TRUE)
+
   ################################################################################
   # Define considered regime *thresholds*
   ################################################################################
   
   
-  
   threshold_values <- list(
-    X_lowPEEP = c(150, 200, 250), # smaller than
+    X_lowPEEP = c(150, 200, 250), # larger than
     X_highPEEP = c(150, 200, 250) # larger than
   )
   
@@ -247,233 +181,347 @@ fboot <- function(df, indices) {
   )
   # Add a count column 'regime' starting at 1 for the first combination
   combinations <- cbind(regime = rownames(combinations), combinations)
-  
+
+
   # Create vectors storing information for each regime
-  percentage_uncensored_values <- numeric(nrow(combinations))
-  cuminc_suc_ext_values <- numeric(nrow(combinations))
-  RMTL_suc_ext_values <- numeric(nrow(combinations))
-  PF_lowPEEP_values <- numeric(nrow(combinations))
-  PF_highPEEP_values <- numeric(nrow(combinations))
-  switch_failed_values <- numeric(nrow(combinations))
+  percentage_uncensored_values_imp <- matrix(NA_real_, nrow = nrow(combinations), ncol = m)
+  cuminc_suc_ext_values_imp <- matrix(NA_real_, nrow = nrow(combinations), ncol = m)
+  RMTL_suc_ext_values_imp <- matrix(NA_real_, nrow = nrow(combinations), ncol = m)
+  switch_failed_values_imp <- matrix(NA_real_, nrow = nrow(combinations), ncol = m)
   
   
   # store results of each time point for plotting
-  ci_df <- as.data.frame(matrix(NA, nrow = length(threshold_values$X_lowPEEP) * length(threshold_values$X_highPEEP), ncol = length(seq(0, 672, by = 24))))
-  
-  
-  #################################################################################
-  
+  ci_df_imp <- array(NA_real_, dim = c(length(threshold_values$X_lowPEEP) * length(threshold_values$X_highPEEP), length(seq(0, 672, by = 24)), m))
   
   combinations_sorted <- combinations[order(as.integer(combinations$regime)), ]
   
-  # Loop over each combination
-  for (i in rev(1:nrow(combinations_sorted))) {
-  
-    regime_nr <- combinations_sorted$regime[i]
+  for (j in 1:m) {
+    completed_data <- complete(mice_imp, j)
+    imv_data[, impute_vars] <- completed_data
     
-    # Set the threshold values based on the current combination
-    X_lowPEEP <- combinations_sorted$X_lowPEEP[i]
-    X_highPEEP <- combinations_sorted$X_highPEEP[i]
-    
-    print(paste('regime:', regime_nr, " PEEP<8, PF>", X_lowPEEP, "; PEEP>8, PF>", X_highPEEP))
-    
-    # create a copy of the dataset and assign it to regime 1
-    df_csw <- df
-    # create new column specifying which regime
-    df_csw$regime <- regime_nr
-    
-    ################################################################################
-    # Censor patients the moment they are no longer compatible with regime
-    # and delete rows after being censored
-    ################################################################################
-    
-    
-    # add columns eligible_timemin1
-    # eligible if: PEEP<8 & P/F>XlowPEEP, or PEEP >=8 and P/F>XhighPEEP
-    df_csw <- df_csw %>%
-      arrange(stay_id, hour) %>%
-      group_by(stay_id) %>%
-      # eligible on time-1?
-      mutate(eligible_timemin1 = ifelse(
-        (switched_timemin1 != 1 ) & (nmb_timemin1 != 1) & 
-          (
-            (!is.na(peep_timemin1) & (peep_timemin1 < 8) & !is.na(PF_ratio_timemin1) & (PF_ratio_timemin1 > X_lowPEEP)) |
-              (!is.na(peep_timemin1) & (peep_timemin1 >= 8) & !is.na(PF_ratio_timemin1) & (PF_ratio_timemin1 > X_highPEEP))
-          ),
-        1, 0)
-      )
-    # censor if eligible but did not switch, or switched but not eligible
-    df_csw <- df_csw %>%
-      arrange(stay_id, hour) %>%
-      group_by(stay_id) %>%
-      mutate(censored = ifelse(
-        ((switched_timemin1 !=1) & (switched == 1) & (eligible_timemin1 == 0)) | # sc1 – switches but not eligible for switching 
-          ((switched != 1) & (died != 1) & (ltfu_discharged != 1) & (eligible_timemin1 == 1)),  # sc4 – does not switch but eligible 
-        1, 0)
-      )  
-    
-    
-    # remove all rows after the first censoring occurrence
-    df_csw <- df_csw %>%
-      arrange(stay_id, hour) %>%
-      group_by(stay_id) %>%
-      mutate(before_censoring_occurrence = cumsum(censored == 1) ==0)%>% # before censoring occurs --> TRUE
-      mutate(first_censoring_occurrence = cumsum(censored == 1) == 1) %>% # first censoring occurrence --> TRUE
-      filter(before_censoring_occurrence | (first_censoring_occurrence & (censored == 1))) %>%
-      dplyr::select(-c(before_censoring_occurrence, first_censoring_occurrence))
-    
-    # find probability of remaining uncensored for stabilization
-    df_csw$uncensor <- 1-df_csw$censored
-    cens_model <- glm(formula = uncensor ~ factor(hour) , 
-                      data = df_csw,  
-                      family = "binomial")
-    df_csw$prob_uncen <- NA # initialize column
-    df_csw$prob_uncen <- predict(cens_model, df_csw, type = "response")
-    
-    # compute prob of remaining uncensored
-    df_csw <- df_csw %>%
-      arrange(stay_id, hour) %>%
-      group_by(stay_id) %>%
-      mutate(
-        prob_uncen3 = prob_uncen^uncensor * (1-prob_uncen)^(1-uncensor)) # when censored, 1-prob uncensored
-    
-    ##############################################################################
-    # find average PEEP and PF just before switch
-    ##############################################################################
-    df_switch <- df_csw[(df_csw$censored == 0) & (df_csw$switched == 1) & (df_csw$switched_timemin1 != 1), ]
-    
-    # Split into two datasets
-    df_lowPEEP  <- df_switch[df_switch$peep_timemin1 <8 ,] 
-    df_highPEEP <- df_switch[df_switch$peep_timemin1 >=8 ,]
-    
-    median_val <- median(df_lowPEEP$PF_ratio_timemin1, na.rm = TRUE)
-    Q1 <- quantile(df_lowPEEP$PF_ratio_timemin1, probs = c(0.25), na.rm = TRUE)
-    Q3 <- quantile(df_lowPEEP$PF_ratio_timemin1, probs = c(0.75), na.rm = TRUE)
-    PFspread_lowPEEP <- paste0(round(median_val), " (", round(Q1), "–", round(Q3), ")")
-    
-    median_val <- median(df_highPEEP$PF_ratio_timemin1, na.rm = TRUE)
-    Q1 <- quantile(df_highPEEP$PF_ratio_timemin1, probs = c(0.25), na.rm = TRUE)
-    Q3 <- quantile(df_highPEEP$PF_ratio_timemin1, probs = c(0.75), na.rm = TRUE)
-    PFspread_highPEEP <- paste0(round(median_val), " (", round(Q1), "–", round(Q3), ")")
-    
-    
-    ################################################################################
-    ### IPCW
-    ################################################################################
-    
-    # compute prob of remaining uncensored
-    df_csw <- df_csw %>%
-      arrange(stay_id, hour) %>%
-      group_by(stay_id) %>%
-      mutate(
-        prob_uncen2 = ps^switched * (1-ps)^(1-switched))
-    
-    # Compute (stabilized) Inverse Probability of Compatibility Weights using propensity scores and decision rules for different regimes. 
-    df_csw <- mutate(group_by(df_csw, stay_id), w_IPW = cumprod(prob_uncen3) / cumprod(prob_uncen2))
-    
-    # truncate weights such that all weights >10 are set to 10
-    trunc.cutoff <- 10
-    df_csw$w_IPW <- ifelse(df_csw$w_IPW>trunc.cutoff, trunc.cutoff, df_csw$w_IPW)
-    
-    
-    ##############################################################################
-    # Combine with data after the TTE period and make sure censored and weights are carried forward
-    
-    colnames(df_csw) 
-    colnames(df_after_TTE_period)
-    
-    # Get the stay_ids already in df_csw
-    stay_ids <- unique(df_csw$stay_id)
-    
-    # Extract rows from df_survival beyond TTE_period
-    df_post_TTE_period <- df_after_TTE_period %>%
-      filter(stay_id %in% stay_ids) %>%
-      dplyr::anti_join(df_csw, by = c("stay_id", "hour"))
-    
-    
-    # Combine the TTE period data with extended rows
-    df_combined <- bind_rows(df_csw, df_post_TTE_period) %>%
-      arrange(stay_id, hour)
-    
-    
-    # Apply LOCF to 'censored' and 'weight' by stay_id
-    df_combined <- df_combined %>%
-      arrange(stay_id, hour) %>%
-      group_by(stay_id) %>%
-      tidyr::fill(censored, w_IPW, .direction = "down") %>%
-      ungroup()
-    
-    summary(df_combined)
-    
-    
-    ################################################################################
-    ### Aalen-Johanson estimator
-    ################################################################################
-    
-    
-    percentage_uncensored <- df_combined %>%
-      group_by(stay_id) %>%
-      filter(all(censored == 0)) %>%
-      summarise() %>%
-      summarise(pct = n() / n_distinct(df_combined$stay_id) * 100) %>%
-      pull(pct)
-    
-    # Keep only non-censored patients
-    df_combined <- df_combined[df_combined$censored == 0,] 
-    
-    # among those who switched, find percentage of failed
-    switch_failed_perc <- df_combined %>%
-      group_by(stay_id) %>%
-      summarise(
-        switched = any(switched == 1),
-        switch_failed = any(switch_failed == 1)
-      ) %>%
-      filter(switched) %>%
-      summarise(pct = mean(switch_failed) * 100) %>%
-      pull(pct)
-    
-    df_combined <- df_combined %>%
+    # combine the imputed imv data and the no imv data
+    df <- rbind(imv_data, no_imv_data)  
+
+    # Make sure cv_sofa score in 'extubated' patients is latest known cv_sofa score
+    df <- df %>%
       arrange(stay_id, hour) %>%  
       group_by(stay_id) %>%
-      mutate(
-        T_start = coalesce(lag(hour), -1),   # previous time point
-        T_stop = hour
-      ) %>%
-      ungroup()
+      mutate(cv_sofa = na.locf(cv_sofa, na.rm = FALSE)) # latest known cv_sofa
     
-    df_combined$event <- df_combined$successfully_extubated * 1 + df_combined$died * 2
-    df_combined$event <- factor(df_combined$event, 0:2, c("atrisk", "extubated_success", "mortality")) 
-    
-    
-    ci <- survfit(Surv(T_start, T_stop, event) ~ 1, data = df_combined, weights = w_IPW, id = stay_id)
-    
-    
-    ci_28 <- summary(ci, times=28*24, extend=TRUE)$pstate[,2]
-    # find RMTL
-    rmtl_28 <- (summary(ci, rmean=28*24)$table[2,3])/24
-    
-    # Store results at each time point for plot
-    time_points_plot <- seq(0, 672, by = 24)
-    ci_28_plot <- summary(ci, times=time_points_plot, extend=TRUE)$pstate[,2]
-    ci_df[i, 1:length(ci_28_plot)] <- ci_28_plot
-    
-    
-    percentage_uncensored_values[i] <- percentage_uncensored
-    cuminc_suc_ext_values[i] <- ci_28
-    RMTL_suc_ext_values[i] <- rmtl_28
-    PF_lowPEEP_values[i] <- PFspread_lowPEEP
-    PF_highPEEP_values[i] <- PFspread_highPEEP
-    switch_failed_values[i] <- switch_failed_perc
-    
-    
-    
-  }
+    ################################################################################
+    # turn sedation back to factors
+    df$sedation <- factor(
+      df$sedation,
+      levels = 1:3,
+      labels = c("Awake", "Moderate sedation", "Deep sedation"),
+      ordered = TRUE
+    )
+
   
-  res <- c(percentage_uncensored_values, cuminc_suc_ext_values, RMTL_suc_ext_values, switch_failed_values, unlist(ci_df[ , paste0("V", 1:29)]))
-  names(res) <- c("NR_stays_perc", "cuminc_suc_ext","RMTL_suc_ext", "perc_switch_fail", colnames(ci_df))
+    # convert 'cv_sofa' to factors
+    df$cv_sofa <- cut(
+      df$cv_sofa,
+      breaks = c(-Inf, 1, 3, Inf),   # intervals: less than 1, 1 to 3, greater than 3
+      labels = c("<1", "1-3", ">3"),
+      right = FALSE,                 # intervals are left-inclusive, right-exclusive: [a,b)
+      ordered_result = TRUE          # creates an ordered factor
+    )
+    
+    df$cv_sofa_w_missing <- cut(
+      df$cv_sofa_w_missing,
+      breaks = c(-Inf, 1, 3, Inf),   # intervals: less than 1, 1 to 3, greater than 3
+      labels = c("<1", "1-3", ">3"),
+      right = FALSE,                 # intervals are left-inclusive, right-exclusive: [a,b)
+      ordered_result = TRUE          # creates an ordered factor
+    )
+    
+  
+    ################################################################################
+    
+    # add columns of PF, driving pressure, ph, peep values and still_controlled on previous time point (time-1)
+    df <- df %>%
+      arrange(stay_id, hour) %>%
+      group_by(stay_id) %>%
+      mutate(PF_ratio_timemin1 = lag(PF_ratio, default = NA),
+             driving_timemin1  = lag(driving, default = NA),
+             vt_timemin1  = lag(vt, default = NA),
+             pco2_timemin1  = lag(pco2, default = NA),
+             rr_set_timemin1  = lag(rr_set, default = NA),
+             ph_timemin1  = lag(ph, default = NA), 
+             peep_timemin1  = lag(peep, default = NA),
+             cv_sofa_timemin1  = lag(cv_sofa, default = NA),
+             sedation_timemin1  = lag(sedation, default = NA),
+             switched_timemin1  = lag(switched, default = NA),
+             nmb_timemin1  = lag(nmb, default = NA))
+  
+    df$switched_timemin1 <- ifelse(is.na(df$switched_timemin1), 0, df$switched_timemin1)
+    
+    # fill ph, peep, PF, dp , min_vol for extubated/death with latest known value, for confounding
+    df <- df %>%
+      arrange(stay_id, hour) %>%
+      group_by(stay_id) %>%
+      mutate(ph_timemin1 = zoo::na.locf(ph_timemin1, na.rm = FALSE)) %>%
+      mutate(pco2_timemin1 = zoo::na.locf(pco2_timemin1, na.rm = FALSE)) %>%
+      mutate(peep_timemin1 = zoo::na.locf(peep_timemin1, na.rm = FALSE)) %>%
+      mutate(PF_ratio_timemin1 = zoo::na.locf(PF_ratio_timemin1, na.rm = FALSE)) %>%
+      mutate(driving_timemin1 = zoo::na.locf(driving_timemin1, na.rm = FALSE)) %>%
+      mutate(rr_set_timemin1 = zoo::na.locf(rr_set_timemin1, na.rm = FALSE)) %>%
+      mutate(vt_timemin1 = zoo::na.locf(vt_timemin1, na.rm = FALSE)) %>%
+      mutate(sedation_timemin1 = zoo::na.locf(sedation_timemin1, na.rm = FALSE))%>%
+      mutate(nmb_timemin1 = zoo::na.locf(nmb_timemin1, na.rm = FALSE))
+  
+  
+  
+    ################################################################################
+    # Propensity score model
+    ################################################################################
+    print('model')
+    
+    
+    data_model <- df[df$switched_timemin1 == 0 & df$hour != 0 ,]
+    
+    # find probability of switching
+    ps_model <- glm(formula = switched ~ factor(hour) + ph_timemin1*pco2_timemin1 + pco2_timemin1*factor(hour) + ph_timemin1*factor(hour) + PF_ratio_timemin1*factor(hour)+ peep_timemin1*factor(hour) + driving_timemin1*factor(hour) + rr_set_timemin1*factor(hour) + vt_timemin1*factor(hour)+ cv_sofa_timemin1*factor(hour) + sedation_timemin1*factor(hour),
+                    data = data_model, # exclude day 0 as there are no predictor variables (no hour before)
+                    family = "binomial")
+  
+  
+    df$ps <- NA # initialize column
+    df$ps[df$switched_timemin1 == 0 & df$hour != 0 ] <- predict(ps_model,type = "response")
+    df$ps[df$switched_timemin1 == 1] <- 1
+    df$ps[df$hour == 0] <- 0 # probability of switching at day=0 is 0
+  
+  
+    # Loop over each regime
+    for (i in rev(1:nrow(combinations_sorted))) {
+    
+      regime_nr <- combinations_sorted$regime[i]
+      
+      # Set the threshold values based on the current combination
+      X_lowPEEP <- combinations_sorted$X_lowPEEP[i]
+      X_highPEEP <- combinations_sorted$X_highPEEP[i]
+      
+      print(paste('regime:', regime_nr, " PEEP<8, PF>", X_lowPEEP, "; PEEP>8, PF>", X_highPEEP))
+
+      # define regimes 1, 5, 9 for pairwise comparisions later on
+      if (X_lowPEEP == 150 & X_highPEEP == 150) {
+        idx_1 <- i
+      } else if (X_lowPEEP == 200 & X_highPEEP == 200) {
+        idx_5 <- i
+      } else if (X_lowPEEP == 250 & X_highPEEP == 250) {
+        idx_9 <- i
+      }    
+    
+      # create a copy of the dataset and assign it to regime 1
+      df_csw <- df
+      # create new column specifying which regime
+      df_csw$regime <- regime_nr
+      
+      ################################################################################
+      # Censor patients the moment they are no longer compatible with regime
+      # and delete rows after being censored
+      ################################################################################
+    
+    
+      # add columns eligible_timemin1
+      # eligible if: PEEP<8 & P/F>XlowPEEP, or PEEP >=8 and P/F>XhighPEEP
+      df_csw <- df_csw %>%
+        arrange(stay_id, hour) %>%
+        group_by(stay_id) %>%
+        # eligible on time-1?
+        mutate(eligible_timemin1 = ifelse(
+          (switched_timemin1 != 1 ) & (nmb_timemin1 != 1) & 
+            (
+              (!is.na(peep_timemin1) & (peep_timemin1 < 8) & !is.na(PF_ratio_timemin1) & (PF_ratio_timemin1 > X_lowPEEP)) |
+                (!is.na(peep_timemin1) & (peep_timemin1 >= 8) & !is.na(PF_ratio_timemin1) & (PF_ratio_timemin1 > X_highPEEP))
+            ),
+          1, 0)
+        )
+      # censor if eligible but did not switch, or switched but not eligible
+      df_csw <- df_csw %>%
+        arrange(stay_id, hour) %>%
+        group_by(stay_id) %>%
+        mutate(censored = ifelse(
+          ((switched_timemin1 !=1) & (switched == 1) & (eligible_timemin1 == 0)) | # sc1 – switches but not eligible for switching 
+            ((switched != 1) & (died != 1) & (ltfu_discharged != 1) & (eligible_timemin1 == 1)),  # sc4 – does not switch but eligible 
+          1, 0)
+        )  
+      
+    
+      # remove all rows after the first censoring occurrence
+      df_csw <- df_csw %>%
+        arrange(stay_id, hour) %>%
+        group_by(stay_id) %>%
+        mutate(before_censoring_occurrence = cumsum(censored == 1) ==0)%>% # before censoring occurs --> TRUE
+        mutate(first_censoring_occurrence = cumsum(censored == 1) == 1) %>% # first censoring occurrence --> TRUE
+        filter(before_censoring_occurrence | (first_censoring_occurrence & (censored == 1))) %>%
+        dplyr::select(-c(before_censoring_occurrence, first_censoring_occurrence))
+      
+      # find probability of remaining uncensored for stabilization
+      df_csw$uncensor <- 1-df_csw$censored
+      cens_model <- glm(formula = uncensor ~ factor(hour) , 
+                        data = df_csw,  
+                        family = "binomial")
+      df_csw$prob_uncen <- NA # initialize column
+      df_csw$prob_uncen <- predict(cens_model, df_csw, type = "response")
+    
+      # compute prob of remaining uncensored
+      df_csw <- df_csw %>%
+        arrange(stay_id, hour) %>%
+        group_by(stay_id) %>%
+        mutate(
+          prob_uncen3 = prob_uncen^uncensor * (1-prob_uncen)^(1-uncensor)) # when censored, 1-prob uncensored
+    
+      ##############################################################################
+      # find average PEEP and PF just before switch
+      ##############################################################################
+      df_switch <- df_csw[(df_csw$censored == 0) & (df_csw$switched == 1) & (df_csw$switched_timemin1 != 1), ]
+      
+      # Split into two datasets
+      df_lowPEEP  <- df_switch[df_switch$peep_timemin1 <8 ,] 
+      df_highPEEP <- df_switch[df_switch$peep_timemin1 >=8 ,]
+      
+      median_val <- median(df_lowPEEP$PF_ratio_timemin1, na.rm = TRUE)
+      Q1 <- quantile(df_lowPEEP$PF_ratio_timemin1, probs = c(0.25), na.rm = TRUE)
+      Q3 <- quantile(df_lowPEEP$PF_ratio_timemin1, probs = c(0.75), na.rm = TRUE)
+      PFspread_lowPEEP <- paste0(round(median_val), " (", round(Q1), "–", round(Q3), ")")
+      
+      median_val <- median(df_highPEEP$PF_ratio_timemin1, na.rm = TRUE)
+      Q1 <- quantile(df_highPEEP$PF_ratio_timemin1, probs = c(0.25), na.rm = TRUE)
+      Q3 <- quantile(df_highPEEP$PF_ratio_timemin1, probs = c(0.75), na.rm = TRUE)
+      PFspread_highPEEP <- paste0(round(median_val), " (", round(Q1), "–", round(Q3), ")")
+    
+    
+      ################################################################################
+      ### IPCW
+      ################################################################################
+      
+      # compute prob of remaining uncensored
+      df_csw <- df_csw %>%
+        arrange(stay_id, hour) %>%
+        group_by(stay_id) %>%
+        mutate(
+          prob_uncen2 = ps^switched * (1-ps)^(1-switched))
+      
+      # Compute (stabilized) Inverse Probability of Compatibility Weights using propensity scores and decision rules for different regimes. 
+      df_csw <- mutate(group_by(df_csw, stay_id), w_IPW = cumprod(prob_uncen3) / cumprod(prob_uncen2))
+      
+      # truncate weights such that all weights >10 are set to 10
+      trunc.cutoff <- 10
+      df_csw$w_IPW <- ifelse(df_csw$w_IPW>trunc.cutoff, trunc.cutoff, df_csw$w_IPW)
+    
+    
+      ##############################################################################
+      # Combine with data after the TTE period and make sure censored and weights are carried forward
+      
+      colnames(df_csw) 
+      colnames(df_after_TTE_period)
+      
+      # Get the stay_ids already in df_csw
+      stay_ids <- unique(df_csw$stay_id)
+      
+      # Extract rows from df_survival beyond TTE_period
+      df_post_TTE_period <- df_after_TTE_period %>%
+        filter(stay_id %in% stay_ids) %>%
+        dplyr::anti_join(df_csw, by = c("stay_id", "hour"))
+    
+    
+      # Combine the TTE period data with extended rows
+      df_combined <- bind_rows(df_csw, df_post_TTE_period) %>%
+        arrange(stay_id, hour)
+      
+      
+      # Apply LOCF to 'censored' and 'weight' by stay_id
+      df_combined <- df_combined %>%
+        arrange(stay_id, hour) %>%
+        group_by(stay_id) %>%
+        tidyr::fill(censored, w_IPW, .direction = "down") %>%
+        ungroup()
+      
+      summary(df_combined)
+    
+    
+      ################################################################################
+      ### Aalen-Johanson estimator
+      ################################################################################
+      
+      
+      percentage_uncensored <- df_combined %>%
+        group_by(stay_id) %>%
+        filter(all(censored == 0)) %>%
+        summarise() %>%
+        summarise(pct = n() / n_distinct(df_combined$stay_id) * 100) %>%
+        pull(pct)
+      
+      # Keep only non-censored patients
+      df_combined <- df_combined[df_combined$censored == 0,] 
+      
+      # among those who switched, find percentage of failed
+      switch_failed_perc <- df_combined %>%
+        group_by(stay_id) %>%
+        summarise(
+          switched = any(switched == 1),
+          switch_failed = any(switch_failed == 1)
+        ) %>%
+        filter(switched) %>%
+        summarise(pct = mean(switch_failed) * 100) %>%
+        pull(pct)
+      
+      df_combined <- df_combined %>%
+        arrange(stay_id, hour) %>%  
+        group_by(stay_id) %>%
+        mutate(
+          T_start = coalesce(lag(hour), -1),   # previous time point
+          T_stop = hour
+        ) %>%
+        ungroup()
+    
+      df_combined$event <- df_combined$successfully_extubated * 1 + df_combined$died * 2
+      df_combined$event <- factor(df_combined$event, 0:2, c("atrisk", "extubated_success", "mortality")) 
+      
+      ci <- survfit(Surv(T_start, T_stop, event) ~ 1, data = df_combined, weights = w_IPW, id = stay_id)
+      
+      ci_28 <- summary(ci, times=28*24, extend=TRUE)$pstate[,2]
+      # find RMTL
+      rmtl_28 <- (summary(ci, rmean=28*24)$table[2,3])/24
+      
+      # Store results at each time point for plot
+      time_points_plot <- seq(0, 672, by = 24)
+      ci_28_plot <- summary(ci, times=time_points_plot, extend=TRUE)$pstate[,2]
+      ci_df_imp[i, 1:length(ci_28_plot), j] <- ci_28_plot
+    
+      percentage_uncensored_values_imp[i, j] <- percentage_uncensored
+      cuminc_suc_ext_values_imp[i, j] <- ci_28
+      RMTL_suc_ext_values_imp[i, j] <- rmtl_28
+      switch_failed_values_imp[i, j] <- switch_failed_perc
+    
+    }
+  
+    # Calculate pairwise differences per imputation (vectors length = m imputations)
+    diff_5_1_imp <- RMTL_suc_ext_values_imp[idx_5, ] - RMTL_suc_ext_values_imp[idx_1, ]
+    diff_9_1_imp <- RMTL_suc_ext_values_imp[idx_9, ] - RMTL_suc_ext_values_imp[idx_1, ]
+    diff_9_5_imp <- RMTL_suc_ext_values_imp[idx_9, ] - RMTL_suc_ext_values_imp[idx_5, ]
+  }
+  percentage_uncensored_values <- rowMeans(percentage_uncensored_values_imp, na.rm = TRUE)
+  cuminc_suc_ext_values <- rowMeans(cuminc_suc_ext_values_imp, na.rm = TRUE)
+  RMTL_suc_ext_values <- rowMeans(RMTL_suc_ext_values_imp, na.rm = TRUE)
+  switch_failed_values <- rowMeans(switch_failed_values_imp, na.rm = TRUE)
+  
+  ci_df <- as.data.frame(apply(ci_df_imp, c(1, 2), mean, na.rm=TRUE))  # average over imputations
+  
+  # Average differences across imputations
+  diff_5_1_rmtl <- mean(diff_5_1_imp, na.rm = TRUE)
+  diff_9_1_rmtl <- mean(diff_9_1_imp, na.rm = TRUE)
+  diff_9_5_rmtl <- mean(diff_9_5_imp, na.rm = TRUE)
+  
+  # Create named vector of pooled differences
+  pairwise_diffs <- c(diff_5_1_rmtl, diff_9_1_rmtl, diff_9_5_rmtl)
+  names(pairwise_diffs) <- c("diff_5_1_rmtl", "diff_9_1_rmtl", "diff_9_5_rmtl")
+  
+  res <- c(percentage_uncensored_values, cuminc_suc_ext_values, RMTL_suc_ext_values, switch_failed_values, unlist(ci_df[ , paste0("V", 1:29)]),pairwise_diffs)
+  names(res) <- c("NR_stays_perc", "cuminc_suc_ext","RMTL_suc_ext", "perc_switch_fail", colnames(ci_df),pairwise_diffs)
   return(res)
 }
-
 # call the function
 results_boot_primaryoutcome <- boot(data=df_survival, statistic=fboot, R=num_iterations)
 save.image(file = file.path(output_folder_name,"/workspace_DTR_primary.RData"))
