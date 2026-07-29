@@ -20,20 +20,29 @@ num_iterations <- 150
 output_folder_name <- "path/to/your/results" # Change this to your local directory
 
 # 3. Load Data
-# df_survival <- read.csv("your_data.csv")
+df_survival <- read.csv("your_data.csv")
+
+# 4. Pre-split the data for more efficient bootstrap
+patient_list <- split(df_survival, df_survival$stay_id)
 
 ################################################################################
 
 
 count <- 0
 
-fboot <- function(df, indices) {
+fboot <- function(patient_list, indices) {
   
-  total_ids <- unique(df$stay_id) # get all distinct patients
-  total_ids_df <- data.frame(stay_id = total_ids)
-  sample_ids <- total_ids_df[indices,] # allows boot to select sample
-  
-  df <- df[df$stay_id %in% sample_ids,] 
+  # draw patient-level units with replacement
+  df <- do.call(
+    rbind,
+    Map(function(dat, new_id) {
+      dat$original_stay_id <- dat$stay_id # retain the original stay_id for reference
+      dat$stay_id <- new_id # create a new stay_id so duplicates don't collide
+      dat
+    },
+    patient_list[indices],
+    seq_along(indices))
+  )
   
   print(count)
   assign("count", count+1, envir = .GlobalEnv)
@@ -523,7 +532,7 @@ fboot <- function(df, indices) {
   return(res)
 }
 # call the function
-results_boot_primaryoutcome <- boot(data=df_survival, statistic=fboot, R=num_iterations)
+results_boot_primaryoutcome <- boot(data=patient_list, statistic=fboot, R=num_iterations)
 save.image(file = file.path(output_folder_name,"/workspace_DTR_primary.RData"))
 
 # create combinations df
